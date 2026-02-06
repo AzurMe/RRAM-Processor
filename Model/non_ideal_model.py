@@ -1,103 +1,92 @@
 import numpy as np
 
 
-class Realistic_RRAM_Processor:
-    def __init__(self, g_sigma=0.05, v_noise_std=0.01):
+class RRAM_VMM_Processor_4b_nonideal:
+    def __init__(self, g_sigma=0.05, v_noise=0.005):
         # --- 1. 系统参数 ---
-        self.vdd = 1.8
-        self.v_cm = 0.9
-        self.adc_bits = 8
-        self.dac_bits = 8
-        self.array_size = (4, 4)
+        self.vdd, self.vread = 1.8, 0.3
+        self.v_min, self.v_max = 0.1, 1.7
+        self.adc_bits, self.array_size = 8, (4, 4)
+        self.cell_bit = 4
 
-        # --- 2. 非理想性参数 ---
-        self.g_sigma = g_sigma
-        self.v_noise_std = v_noise_std
+        # --- 非理想性参数 ---
+        self.g_sigma = g_sigma  # 电导波动标准差 (e.g., 5%)
+        self.v_noise = v_noise  # TIA 热噪声标准差 (e.g., 5mV)
+        self.dac_gain_err = 0.01  # DAC 增益误差 (1%)
 
-        # --- 3. RRAM 参数 ---
-        self.r_lrs = 10e3
-        self.r_hrs = 1e6
-        self.g_unit_lrs = 1 / self.r_lrs
-        self.g_unit_hrs = 1 / self.r_hrs
+        # --- 2. 器件参数 ---
+        self.r_lrs, self.r_hrs = 10e3, 1e6
+        self.g_lrs, self.g_hrs = 1 / self.r_lrs, 1 / self.r_hrs
 
-        # --- 4. 差分 TIA 设计 ---
-        # 4行 * 15(最大权重因子) * 1.8V(最大输入) * G_lrs
-        max_weight_factor = 15
-        max_col_current = self.array_size[0] * (self.vdd * max_weight_factor * self.g_unit_lrs)
+        # --- 3. TIA 设计 ---
+        # 满载电流: 4行 * 0.3V * (15*g_lrs)
+        self.i_max = self.array_size[0] * (self.vread * 15 * self.g_lrs)
+        self.i_min = self.array_size[0] * (self.vread * 15 * self.g_hrs)
+        self.rf = (self.v_max - self.v_min) / (self.i_max - self.i_min)
 
-        # 设定 Rf，使最大差分摆幅为 0.8V (相对于 Vcm)
-        self.rf = 0.8 / max_col_current
+        # --- 4. 生成 LUT ---
+        self.calibration_value = 8
+        self.lut = self.calibrate_lut()
 
-        # 预计算校准 LUT
-        self.lut = self._calibrate_lut()
-
-    def _quantize(self, val, bits, v_min, v_max):
-        levels = 2 ** bits - 1
-        normalized = (val - v_min) / (v_max - v_min)
-        code = np.round(normalized * levels)
-        code = np.clip(code, 0, levels)
-        return v_min + (code / levels) * (v_max - v_min), code.astype(int)
-
-    def _calibrate_lut(self):
-        """
-        不使用增强型 LUT，采用基于 Rf 的理论映射。
-        逻辑量程范围：4行 * 255输入 * 15权重 = 15300
-        """
+    def calibrate_lut(self):
         lut = {}
-        # 理论最大逻辑点积结果
-        max_logic_range = self.array_size[0] * 255 * 15
+        # 计算：当输入为 1 (数字量)，权重为 1 (LRS) 时，产生的电压贡献
+        v_unit_input = (1 / 255) * self.vread
+        v_logic_1 = v_unit_input * self.g_lrs * self.rf
 
         for code in range(256):
-            v_sim = (code / 255) * self.vdd
-            # 这里的 0.8 必须与 __init__ 中的 Rf 计算系数严格一致
-            # 公式：逻辑值 = ((当前电压 - 中间电压) / 设计的最大摆幅) * 最大逻辑范围
-            logic_val = ((v_sim - self.v_cm) / 0.8) * max_logic_range
-            lut[code] = logic_val
+            voltage = (code / 255) * self.vdd
+            logic_val = voltage / v_logic_1
+            lut[code] = int(np.round(logic_val, 2) - self.calibration_value)
+            if lut[code] < 0:
+                lut[code] = 0
         return lut
 
-    def run(self, input_vec_255, weight_mat_15):
-        # 1. DAC: 0-255 映射到 0-1.8V
-        # 注意：这里不再乘以 self.vdd，因为输入本身就是数字量
-        v_in_q, _ = self._quantize(input_vec_255, self.dac_bits, 0, 255)
-        v_in = (v_in_q / 255) * self.vdd
+    def dac(self, input_vector):
+        """引入 DAC 增益误差"""
+        gain_error = 1 + np.random.uniform(-self.dac_gain_err, self.dac_gain_err)
+        analog_voltages = (input_vector * self.vread / 255) * gain_error
+        return np.clip(analog_voltages, 0, self.vread)
 
-        # 2. 权重映射并加入波动
-        # 权重已经是 0-15 整数，无需 round(weight_mat * 15)
-        g_p = np.zeros_like(weight_mat_15, dtype=float)
-        g_m = np.zeros_like(weight_mat_15, dtype=float)
+    def rram_array_processing(self, voltage_vector, weight_matrix):
+        """计算含电导波动的 4-bit 权重电导"""
+        rows, cols = weight_matrix.shape
+        g_matrix = np.zeros((rows, cols))
 
-        for i in range(self.array_size[0]):
-            for j in range(self.array_size[1]):
-                val = int(abs(weight_mat_15[i, j]))
-                g_val = 0
-                for b in range(4):
-                    factor = 2 ** b
-                    # 4-bit 单元内部 4 个器件独立噪声
-                    is_lrs = (val >> b) & 1
-                    unit_g = self.g_unit_lrs if is_lrs else self.g_unit_hrs
-                    g_val += factor * unit_g * np.random.normal(1.0, self.g_sigma)
+        for r in range(rows):
+            for c in range(cols):
+                val = int(weight_matrix[r, c])
+                g_cell_total = 0
+                for bit_pos in range(4):
+                    weight_factor = 2 ** bit_pos
+                    bit_val = (val >> bit_pos) & 1
+                    ideal_cond = self.g_lrs if bit_val == 1 else self.g_hrs
 
-                if weight_mat_15[i, j] >= 0:
-                    g_p[i, j] = g_val
-                    # 负端保持全 HRS 噪声
-                    g_m[i, j] = 15 * self.g_unit_hrs * np.random.normal(1.0, self.g_sigma)
-                else:
-                    g_p[i, j] = 15 * self.g_unit_hrs * np.random.normal(1.0, self.g_sigma)
-                    g_m[i, j] = g_val
+                    # --- 引入非理想性：电导波动 ---
+                    real_cond = ideal_cond * (1 + np.random.normal(0, self.g_sigma))
+                    g_cell_total += weight_factor * real_cond
+                g_matrix[r, c] = g_cell_total
 
-        # 3. 阵列计算
-        i_p = np.dot(v_in, g_p)
-        i_m = np.dot(v_in, g_m)
+        return np.dot(voltage_vector, g_matrix)
 
-        # 4. TIA 阶段
-        v_diff_signal = (i_p - i_m) * self.rf
-        v_tia_out = self.v_cm + v_diff_signal
-        # 叠加电路热噪声
-        v_tia_noisy = v_tia_out + np.random.normal(0, self.v_noise_std, v_tia_out.shape)
+    def tia(self, current_vector):
+        """引入 TIA 偏置与热噪声"""
+        v_tia = (current_vector * self.rf) + self.v_min
+        # 加入高斯噪声
+        v_tia += np.random.normal(0, self.v_noise, v_tia.shape)
+        return v_tia
 
-        # 5. ADC 阶段
-        v_tia_noisy = np.clip(v_tia_noisy, 0, self.vdd)
-        _, adc_codes = self._quantize(v_tia_noisy, self.adc_bits, 0, self.vdd)
+    def adc(self, tia_voltages):
+        """ADC 量化"""
+        v_clip = np.clip(tia_voltages, 0, self.vdd)
+        return np.round(v_clip / self.vdd * 255).astype(int)
 
-        # 6. LUT 映射
-        return np.array([self.lut[c] for c in adc_codes])
+    def run(self, input_vec, weight_mat):
+        v_in = self.dac(input_vec)
+        i_out = self.rram_array_processing(v_in, weight_mat)
+        v_tia = self.tia(i_out)
+        adc_codes = self.adc(v_tia)
+        final_result = np.array([self.lut[code] for code in adc_codes])
+
+
+        return final_result

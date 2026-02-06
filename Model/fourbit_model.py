@@ -42,7 +42,6 @@ class RRAM_VMM_Processor_4b:
 
         for code in range(256):
             voltage = (code / 255) * self.vdd
-            # 这里的 logic_val 范围现在是 0 到 1020 (4 * 255)
             logic_val = voltage / v_logic_1
             lut[code] = int(np.round(logic_val, 2) - self.calibration_value)
             if lut[code] < 0:
