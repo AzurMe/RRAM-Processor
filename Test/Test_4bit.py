@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from Model.fourbit_model import RRAM_4Bit_VMM_Processor
+from Model.fourbit_model import RRAM_VMM_Processor_4b
 
 class Test_RRAM_VMM_Processor:
     def batch_test(self, num_samples=100):
@@ -24,7 +24,7 @@ class Test_RRAM_VMM_Processor:
 
             # 4. 计算模拟器值
 
-            processor_instance = RRAM_4Bit_VMM_Processor()
+            processor_instance = RRAM_VMM_Processor_4b()
             sim_res = processor_instance.run(vec, mat)
 
             # 5. 记录数据

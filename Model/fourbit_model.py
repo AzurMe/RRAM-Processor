@@ -1,91 +1,119 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
-
-class RRAM_4Bit_VMM_Processor:
+class RRAM_VMM_Processor_4b:
     def __init__(self):
-        # --- 1. 系统参数 ---
-        self.vdd = 1.8
-        self.adc_bits = 8
-        self.dac_bits = 8
-        self.array_size = (4, 4)
+        # --- 1. 系统参数定义 ---
+        self.vdd = 1.8  # 电源电压 (V)
+        self.vread = 0.3
+        self.v_min = 0.1  # 底部留出 100mV 裕量
+        self.v_max = 1.7  # 顶部留出 100mV 裕量
+        self.adc_bits = 8  # ADC位宽
+        self.dac_bits = 8  # DAC位宽
+        self.array_size = (4, 4)  # 4x4 阵列
+        self.cell_bit = 4
 
-        # --- 2. RRAM 器件参数 ---
+        # --- 2. 器件物理参数 (典型值) ---
+        # 设定 RRAM 电阻值
+        # LRS (Low Resistance State, 逻辑1): 10 kOhm
+        # HRS (High Resistance State, 逻辑0): 1 MOhm (假设开关比为100)
         self.r_lrs = 10e3
         self.r_hrs = 1e6
-        self.g_lrs_unit = 1 / self.r_lrs
-        self.g_hrs_unit = 1 / self.r_hrs
 
-        # --- 3. TIA 设计 (适配 255输入与15权重) ---
-        # 物理最大电流逻辑：4行 x (1.8V电压) x (15倍单元电导)
-        max_weight_factor = 15
-        max_col_conductance = self.array_size[0] * (max_weight_factor * self.g_lrs_unit)
-        max_col_current = self.vdd * max_col_conductance
+        # 对应的电导值 (Conductance)
+        self.g_lrs = 1 / self.r_lrs
+        self.g_hrs = 1 / self.r_hrs
 
-        # 设置 Rf 以防止 ADC 输入溢出 (95% 安全裕量)
-        self.rf = (self.vdd * 0.95) / max_col_current
+        # --- 3. TIA (跨阻放大器) 设计 ---
+        self.i_max = self.array_size[0] * (self.vread * self.g_lrs) * ((2 ** self.cell_bit) - 1)
+        self.i_min = self.array_size[0] * (self.vread * self.g_hrs) * ((2 ** self.cell_bit) - 1)
+        self.rf = (self.v_max - self.v_min) / (self.i_max - self.i_min)
+        print(f"[Init] Rf set to: {self.rf:.2f} Ohms")
 
-        print(f"[System Init] Input: 0-255, Weight: 0-15")
-        print(f"[System Init] TIA Rf: {self.rf:.2f} Ohms")
+        # --- 4. 生成 LUT (查找表) ---
+        # 在实际芯片中，LUT用于消除HRS漏电和非线性误差，将ADC码值映射回逻辑结果
+        self.calibration_value = 8
+        self.lut = self.calibrate_lut()
 
-        # --- 4. 生成校准 LUT ---
-        self.lut = self._calibrate_lut()
-
-    def _quantize(self, value, bits, v_ref):
-        levels = 2 ** bits - 1
-        code = np.round((value / v_ref) * levels)
-        code = np.clip(code, 0, levels)
-        quantized_val = (code / levels) * v_ref
-        return quantized_val, code.astype(int)
-
-    def _calibrate_lut(self):
-        """
-        修正校准逻辑：
-        最大点积结果 = 4行 * 255(输入) * 15(权重) = 15300
-        """
+    def calibrate_lut(self):
         lut = {}
-        # 满量程对应的物理电压点对应的逻辑点积值
-        max_logic_val = self.array_size[0] * 255 * 15
+        # 计算：当输入为 1 (数字量)，权重为 1 (LRS) 时，产生的电压贡献
+        v_unit_input = (1 / 255) * self.vread
+        v_logic_1 = v_unit_input * self.g_lrs * self.rf
 
         for code in range(256):
             voltage = (code / 255) * self.vdd
-            # 这里的 0.95 是 Rf 计算时的缩放因子
-            logic_val = (voltage / (self.vdd * 0.95)) * max_logic_val
-            lut[code] = logic_val
+            # 这里的 logic_val 范围现在是 0 到 1020 (4 * 255)
+            logic_val = voltage / v_logic_1
+            lut[code] = int(np.round(logic_val, 2) - self.calibration_value)
+            if lut[code] < 0:
+                lut[code] = 0
         return lut
 
-    def calculate_cell_conductance(self, w_int_matrix):
+    def dac(self, input_vector):
+        input_vector = np.clip(input_vector, 0, 256)
+        analog_voltages = input_vector * self.vread / 255
+        return analog_voltages
+
+    def rram_array_processing(self, voltage_vector, weight_matrix):
         """计算 4-bit 权重产生的等效电导 (含 4 个并联单元)"""
-        rows, cols = w_int_matrix.shape
+        rows, cols = weight_matrix.shape
         g_matrix = np.zeros((rows, cols))
 
         for r in range(rows):
             for c in range(cols):
-                val = int(w_int_matrix[r, c])
+                val = int(weight_matrix[r, c])
                 g_cell = 0
                 for bit_pos in range(4):
                     weight_factor = 2 ** bit_pos
                     bit_val = (val >> bit_pos) & 1
                     # 模拟支路并联：1 对应 LRS，0 对应 HRS
-                    cond = self.g_lrs_unit if bit_val == 1 else self.g_hrs_unit
+                    cond = self.g_lrs if bit_val == 1 else self.g_hrs
                     g_cell += weight_factor * cond
                 g_matrix[r, c] = g_cell
-        return g_matrix
 
-    def run(self, input_vec_int, weight_mat_int):
-        # 1. DAC: 0-255 输入映射到 0-1.8V
-        v_in_analog = input_vec_int * self.vdd / 255
+        current_vector = np.dot(voltage_vector, g_matrix)
+        return current_vector
 
-        # 2. 权重物理电导映射
-        g_matrix = self.calculate_cell_conductance(weight_mat_int)
+    def tia(self, current_vector):
+        tia_voltages = (current_vector) * self.rf
+        return tia_voltages
 
-        # 3. 物理计算 (KCL)
-        i_out = np.dot(v_in_analog, g_matrix)
+    def adc(self, tia_voltages):
+        level = 2 ** self.adc_bits - 1
+        digital_codes = np.round(tia_voltages / self.vdd * level)
+        return digital_codes.astype(int)
 
-        # 4. TIA & ADC (0-255 code)
-        v_tia = np.clip(i_out * self.rf, 0, self.vdd)
-        _, adc_codes = self._quantize(v_tia, self.adc_bits, self.vdd)
+    def lut_mapping(self, digital_codes):
+        results = [self.lut[code] for code in digital_codes]
+        return (np.array(results))
 
-        # 5. LUT 映射回逻辑结果
-        return np.array([self.lut[c] for c in adc_codes])
+    def run(self, input_vec, weight_mat):
+        print("-" * 50)
+        print(f"Input Vector (Logic): {input_vec}")
+        print(f"Weight Matrix (Logic):\n{weight_mat}")
 
+        # 1. DAC
+        v_in = self.dac(input_vec)
+        print(f"1. DAC Output (Volts): {np.round(v_in, 3)}")
+
+        # 2. RRAM Array (Analog Compute)
+        i_out = self.rram_array_processing(v_in, weight_mat)
+        print(f"2. Array Bitline Current (uA): {np.round(i_out * 1e6, 1)}")
+
+        # 3. TIA
+        tia_voltage = self.tia(i_out)
+
+        # 4. ADC
+        adc_codes = self.adc(tia_voltage)
+        print(f"3. ADC Output Codes (0-255): {adc_codes}")
+
+        # 5. LUT Mapping
+        final_result = self.lut_mapping(adc_codes)
+        # final_result = final_result - self.calibration_value
+        print(f"4. Final Result (via LUT): {final_result}")
+
+        # 6. Theoretical Check (Ideal Math)
+        ideal_result = np.dot(input_vec, weight_mat)
+        print(f"5. Ideal Math Result: {ideal_result}")
+
+        return final_result
