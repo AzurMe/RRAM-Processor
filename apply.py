@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from Model.non_ideal_model import Realistic_RRAM_Processor
+from Model.four_bit_cell import Realistic_RRAM_Processor
 # 复用之前的 Realistic_RRAM_Processor 类逻辑 (简略表示)
 class RRAM_App_Simulator(Realistic_RRAM_Processor):
     def classify(self, input_vector, weight_matrix):

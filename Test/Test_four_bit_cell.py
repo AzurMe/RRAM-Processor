@@ -1,9 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from Model.fourbit_model import RRAM_VMM_Processor_4b
+from Model.four_bit_cell import RRAM_VMM_Processor_4b_nonideal
 
 class Test_RRAM_VMM_Processor:
-    def batch_test(self, num_samples=100, verbose=0):
+    def batch_test(self, num_samples=100, verbose=0, g_sigma=0.05, v_noise=0.005, dac_gain_err = 0.01, n_adc = 0.005):
         """
         Randomly generate test sets and analyze errors
         """
@@ -23,9 +23,8 @@ class Test_RRAM_VMM_Processor:
             ideal_res = np.dot(vec, mat)
 
             # 4. Calculated simulated value
-
-            processor_instance = RRAM_VMM_Processor_4b()
-            sim_res = processor_instance.run(vec, mat,verbose)
+            processor_instance = RRAM_VMM_Processor_4b_nonideal(g_sigma, v_noise, dac_gain_err, n_adc)
+            sim_res = processor_instance.run(vec, mat, verbose)
 
             # 5. Record data
             all_ideal.extend(ideal_res)
@@ -53,7 +52,20 @@ if __name__ == "__main__":
     # Instantiated Processors
     processor = Test_RRAM_VMM_Processor()
 
-    ideal_data, actual_data = processor.batch_test(1000,0)
+    # Set the nonideal parameters
+    g_sigma = 0.05
+    v_noise = 0.005
+    dac_gain_err = 0.01
+    n_adc = 0.005
+
+    print("=" * 30 + " nonideal parameters " + "=" * 30)
+    print(f"Conductance standard deviation (g_sigma)：{g_sigma:.4f} S")
+    print(f"TIA thermal noise (v_noise)：{v_noise:.4f} V")  # 标注单位，贴合电路场景
+    print(f"DAC gain error (dac_gain_err)：{dac_gain_err:.4f}")
+    print(f"ADC input refferd noise (n_adc)：{n_adc:.4f} V")
+    print("=" * 70)
+
+    ideal_data, actual_data = processor.batch_test(1000,0,g_sigma, v_noise, dac_gain_err, n_adc)
 
     plt.figure(figsize=(12, 5))
 
